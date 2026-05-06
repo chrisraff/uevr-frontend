@@ -175,8 +175,15 @@ namespace UEVR {
         private string? m_commandLineAttachExe = null;
         private bool m_ignoreFutureVDWarnings = false;
 
+        private HidListener m_hidListener = new HidListener();
+
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
+
+        [DllImport("winmm.dll", SetLastError = true)]
+        private static extern bool PlaySound(string pszSound, IntPtr hmod, uint fdwSound);
+        private const uint SND_ALIAS = 0x00010000;
+        private const uint SND_ASYNC = 0x00000001;
 
         private string excludedProcessesFile = "excluded.txt";
 
@@ -192,6 +199,14 @@ namespace UEVR {
                     m_commandLineAttachExe = arg.Split('=')[1];
                 }
             }
+        }
+
+        protected override void OnSourceInitialized(EventArgs e) {
+            base.OnSourceInitialized(e);
+            var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            m_hidListener.Initialize(hwnd);
+            m_hidListener.BindingTriggered += OnHidBindingTriggered;
+            m_hidListener.RecordingComplete += OnHidRecordingComplete;
         }
 
         public static bool IsAdministrator() {
@@ -215,6 +230,18 @@ namespace UEVR {
 
             m_updateTimer.Tick += (sender, e) => Dispatcher.Invoke(MainWindow_Update);
             m_updateTimer.Start();
+
+            // Restore saved HID binding
+            if (m_mainWindowSettings.HidBindingBitIndex >= 0 &&
+                !string.IsNullOrEmpty(m_mainWindowSettings.HidBindingDevicePath)) {
+                var binding = new HidBinding {
+                    DevicePath = m_mainWindowSettings.HidBindingDevicePath,
+                    DeviceFriendlyName = m_mainWindowSettings.HidBindingFriendlyName,
+                    ReportBitIndex = m_mainWindowSettings.HidBindingBitIndex,
+                };
+                m_hidListener.SetBinding(binding);
+                UpdateHidBindButton(binding);
+            }
         }
 
         private static bool IsExecutableRunning(string executableName) {
@@ -604,7 +631,19 @@ namespace UEVR {
             m_mainWindowSettings.IgnoreFutureVDWarnings = m_ignoreFutureVDWarnings;
             m_mainWindowSettings.FocusGameOnInjection = m_focusGameOnInjectionCheckbox.IsChecked == true;
 
+            var hidBinding = m_hidListener.GetBinding();
+            if (hidBinding != null && hidBinding.IsValid) {
+                m_mainWindowSettings.HidBindingDevicePath = hidBinding.DevicePath;
+                m_mainWindowSettings.HidBindingFriendlyName = hidBinding.DeviceFriendlyName;
+                m_mainWindowSettings.HidBindingBitIndex = hidBinding.ReportBitIndex;
+            } else {
+                m_mainWindowSettings.HidBindingDevicePath = "";
+                m_mainWindowSettings.HidBindingFriendlyName = "";
+                m_mainWindowSettings.HidBindingBitIndex = -1;
+            }
+
             m_mainWindowSettings.Save();
+            m_hidListener.Dispose();
         }
 
         private string m_lastDisplayedWarningProcess = "";
@@ -1230,6 +1269,91 @@ namespace UEVR {
             } finally {
                 m_processSemaphore.Release();
             }
+        }
+
+        private void UpdateHidBindButton(HidBinding? binding) {
+            if (binding != null && binding.IsValid) {
+                m_hidBindButton.Content = binding.ToString();
+                m_hidClearButton.Visibility = Visibility.Visible;
+            } else {
+                m_hidBindButton.Content = "Bind HID Button";
+                m_hidClearButton.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        private void HidBind_Clicked(object sender, RoutedEventArgs e) {
+            if (m_hidListener.GetBinding()?.IsValid == true) {
+                // Already bound — clicking again starts rebind
+            }
+            m_hidBindButton.Content = "Press a button...";
+            m_hidClearButton.Visibility = Visibility.Collapsed;
+            m_hidListener.StartRecording();
+        }
+
+        private void HidClear_Clicked(object sender, RoutedEventArgs e) {
+            m_hidListener.StopRecording();
+            m_hidListener.SetBinding(null);
+            UpdateHidBindButton(null);
+        }
+
+        private void OnHidRecordingComplete(HidBinding binding) {
+            Dispatcher.Invoke(() => UpdateHidBindButton(binding));
+        }
+
+        private void OnHidBindingTriggered() {
+            Dispatcher.Invoke(() => {
+                if (m_connected) return; // already injected
+
+                // Find injectable process
+                Process? target = null;
+
+                if (m_lastSelectedProcessId != 0) {
+                    try {
+                        var p = Process.GetProcessById(m_lastSelectedProcessId);
+                        if (p != null && !p.HasExited) target = p;
+                    } catch { }
+                }
+
+                if (target == null && !string.IsNullOrEmpty(m_lastSelectedProcessName)) {
+                    foreach (var p in Process.GetProcessesByName(m_lastSelectedProcessName)) {
+                        if (IsInjectableProcess(p)) { target = p; break; }
+                    }
+                }
+
+                // Fall back to whatever injectable process is currently selected in the list
+                if (target == null && m_processListBox.SelectedIndex >= 0 &&
+                    m_processListBox.SelectedIndex < m_processList.Count) {
+                    var candidate = m_processList[m_processListBox.SelectedIndex];
+                    if (candidate != null && !candidate.HasExited) target = candidate;
+                }
+
+                if (target == null) return;
+
+                string runtimeName = m_openvrRadio.IsChecked == true ? "openvr_api.dll" : "openxr_loader.dll";
+
+                if (m_nullifyVRPluginsCheckbox.IsChecked == true) {
+                    IntPtr nullifierBase;
+                    if (Injector.InjectDll(target.Id, "UEVRPluginNullifier.dll", out nullifierBase)
+                        && nullifierBase.ToInt64() > 0) {
+                        Injector.CallFunctionNoArgs(target.Id, "UEVRPluginNullifier.dll",
+                            nullifierBase, "nullify", true);
+                    }
+                }
+
+                if (Injector.InjectDll(target.Id, runtimeName)) {
+                    try {
+                        if (m_currentConfig != null &&
+                            m_currentConfig["Frontend_RequestedRuntime"] != runtimeName) {
+                            m_currentConfig["Frontend_RequestedRuntime"] = runtimeName;
+                            RefreshConfigUI();
+                            SaveCurrentConfig();
+                        }
+                    } catch { }
+
+                    Injector.InjectDll(target.Id, "UEVRBackend.dll");
+                    PlaySound("SystemAsterisk", IntPtr.Zero, SND_ALIAS | SND_ASYNC);
+                }
+            });
         }
     }
 }
