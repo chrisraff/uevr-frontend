@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
 
@@ -60,21 +61,40 @@ namespace UEVR {
             ref uint pcbSize,
             uint cbSizeHeader);
 
-        [DllImport("user32.dll", SetLastError = true)]
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "GetRawInputDeviceInfoW")]
         static extern uint GetRawInputDeviceInfo(
             IntPtr hDevice,
             uint uiCommand,
             IntPtr pData,
             ref uint pcbSize);
 
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern IntPtr CreateFile(
+            string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+            IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+            uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("hid.dll", SetLastError = false)]
+        static extern bool HidD_GetProductString(
+            IntPtr hidDevice,
+            IntPtr buffer,
+            uint bufferLength);
+
         private HwndSource? m_hwndSource;
         private HidBinding? m_binding;
 
-        // Recording state
+        // Recording state — tracked per device so baselines never cross-contaminate
+        private class DeviceRecordingState {
+            public byte[] Baseline = Array.Empty<byte>();
+            public byte[] ChangeMask = Array.Empty<byte>();
+            public int Samples;
+        }
         private bool m_isRecording = false;
-        private byte[]? m_recordingBaseline = null;
-        private int m_baselineSamples = 0;
-        private const int BASELINE_SAMPLE_COUNT = 5;
+        private readonly Dictionary<string, DeviceRecordingState> m_deviceStates = new(StringComparer.OrdinalIgnoreCase);
+        private const int BASELINE_SAMPLE_COUNT = 10;
 
         // Trigger state: track previous report to detect rising edge
         private byte[]? m_lastReport = null;
@@ -114,8 +134,7 @@ namespace UEVR {
 
         public void StartRecording() {
             m_isRecording = true;
-            m_recordingBaseline = null;
-            m_baselineSamples = 0;
+            m_deviceStates.Clear();
         }
 
         public void StopRecording() {
@@ -136,12 +155,37 @@ namespace UEVR {
         }
 
         private static string FriendlyNameFromPath(string devicePath) {
-            // Path looks like \\?\HID#VID_046D&PID_C21F&...
-            // Return the HID-ID segment as a human-readable label.
-            try {
-                var parts = devicePath.Split('#');
-                if (parts.Length >= 2) return parts[1];
-            } catch { }
+            const uint FILE_SHARE_READ  = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint OPEN_EXISTING  = 3;
+            var invalid = new IntPtr(-1);
+
+            var handle = CreateFile(devicePath, 0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+
+            if (handle != invalid) {
+                try {
+                    var buf = Marshal.AllocHGlobal(512);
+                    try {
+                        if (HidD_GetProductString(handle, buf, 512)) {
+                            var name = Marshal.PtrToStringUni(buf)?.Trim();
+                            if (!string.IsNullOrEmpty(name)) return name;
+                        }
+                    } finally {
+                        Marshal.FreeHGlobal(buf);
+                    }
+                } finally {
+                    CloseHandle(handle);
+                }
+            }
+
+            // Fallback: find the path segment that contains VID_/PID_ info
+            foreach (var part in devicePath.Split('#')) {
+                if (part.IndexOf("VID_", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    part.IndexOf("PID_", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return part;
+            }
             return devicePath;
         }
 
@@ -190,19 +234,36 @@ namespace UEVR {
         }
 
         private void HandleRecording(string devicePath, byte[] report, IntPtr hDevice) {
-            // Accumulate baseline so at-rest axis bytes don't falsely register as buttons
-            if (m_baselineSamples < BASELINE_SAMPLE_COUNT) {
-                if (m_recordingBaseline == null || m_recordingBaseline.Length != report.Length)
-                    m_recordingBaseline = new byte[report.Length];
-                for (int i = 0; i < report.Length; i++)
-                    m_recordingBaseline[i] |= report[i]; // OR-accumulate high/rest bits
-                m_baselineSamples++;
+            if (!m_deviceStates.TryGetValue(devicePath, out var ds)) {
+                ds = new DeviceRecordingState {
+                    Baseline = (byte[])report.Clone(),
+                    ChangeMask = new byte[report.Length],
+                    Samples = 1,
+                };
+                m_deviceStates[devicePath] = ds;
                 return;
             }
 
-            // Look for a bit set in the current report that was never set at rest
+            if (ds.Samples < BASELINE_SAMPLE_COUNT) {
+                // Grow arrays if report length changed (shouldn't happen, but be safe)
+                if (report.Length != ds.Baseline.Length) {
+                    ds.Baseline = (byte[])report.Clone();
+                    ds.ChangeMask = new byte[report.Length];
+                } else {
+                    for (int i = 0; i < report.Length; i++) {
+                        ds.ChangeMask[i] |= (byte)(ds.Baseline[i] ^ report[i]);
+                        ds.Baseline[i] |= report[i];
+                    }
+                }
+                ds.Samples++;
+                return;
+            }
+
+            // Baseline established for this device — look for a newly-set bit
+            // in a byte that was stable during baseline (stable byte = button byte).
             for (int b = 0; b < report.Length; b++) {
-                byte restMask = b < m_recordingBaseline!.Length ? m_recordingBaseline[b] : (byte)0;
+                if (b < ds.ChangeMask.Length && ds.ChangeMask[b] != 0) continue;
+                byte restMask = b < ds.Baseline.Length ? ds.Baseline[b] : (byte)0;
                 byte newBits = (byte)(report[b] & ~restMask);
                 if (newBits == 0) continue;
                 for (int bit = 0; bit < 8; bit++) {
