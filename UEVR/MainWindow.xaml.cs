@@ -237,7 +237,7 @@ namespace UEVR {
                 var binding = new HidBinding {
                     DevicePath = m_mainWindowSettings.HidBindingDevicePath,
                     DeviceFriendlyName = m_mainWindowSettings.HidBindingFriendlyName,
-                    ReportBitIndex = m_mainWindowSettings.HidBindingBitIndex,
+                    ButtonUsage = m_mainWindowSettings.HidBindingBitIndex,
                 };
                 m_hidListener.SetBinding(binding);
                 UpdateHidBindButton(binding);
@@ -635,7 +635,7 @@ namespace UEVR {
             if (hidBinding != null && hidBinding.IsValid) {
                 m_mainWindowSettings.HidBindingDevicePath = hidBinding.DevicePath;
                 m_mainWindowSettings.HidBindingFriendlyName = hidBinding.DeviceFriendlyName;
-                m_mainWindowSettings.HidBindingBitIndex = hidBinding.ReportBitIndex;
+                m_mainWindowSettings.HidBindingBitIndex = hidBinding.ButtonUsage;
             } else {
                 m_mainWindowSettings.HidBindingDevicePath = "";
                 m_mainWindowSettings.HidBindingFriendlyName = "";
