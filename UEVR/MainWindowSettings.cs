@@ -42,5 +42,26 @@ namespace UEVR {
             get { return (bool)this["FocusGameOnInjection"]; }
             set { this["FocusGameOnInjection"] = value; }
         }
+
+        [UserScopedSettingAttribute()]
+        [DefaultSettingValueAttribute("")]
+        public string HidBindingDevicePath {
+            get { return (string)(this["HidBindingDevicePath"] ?? ""); }
+            set { this["HidBindingDevicePath"] = value; }
+        }
+
+        [UserScopedSettingAttribute()]
+        [DefaultSettingValueAttribute("")]
+        public string HidBindingFriendlyName {
+            get { return (string)(this["HidBindingFriendlyName"] ?? ""); }
+            set { this["HidBindingFriendlyName"] = value; }
+        }
+
+        [UserScopedSettingAttribute()]
+        [DefaultSettingValueAttribute("-1")]
+        public int HidBindingBitIndex {
+            get { return (int)this["HidBindingBitIndex"]; }
+            set { this["HidBindingBitIndex"] = value; }
+        }
     }
 }

@@ -145,7 +145,15 @@
                     <GroupBox Header="Inject" ClipToBounds="True">
                         <StackPanel ClipToBounds="True" HorizontalAlignment="Left">
                             <ComboBox x:Name="m_processListBox" DropDownOpened="ComboBox_DropDownOpened" SelectionChanged="ComboBox_SelectionChanged" VerticalAlignment="Top" MinWidth="500"/>
-                            <Button x:Name="m_injectButton" Content="Inject" Click="Inject_Clicked"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button x:Name="m_injectButton" Content="Inject" Click="Inject_Clicked" MinWidth="200"/>
+                                <Button x:Name="m_hidBindButton" Content="Bind HID Button" Click="HidBind_Clicked"
+                                        Margin="6,0,0,0" MinWidth="160"
+                                        ToolTip="Click then press a joystick/gamepad button to bind background injection"/>
+                                <Button x:Name="m_hidClearButton" Content="✕" Click="HidClear_Clicked"
+                                        Margin="2,0,0,0" Width="28" Visibility="Collapsed"
+                                        ToolTip="Clear HID binding"/>
+                            </StackPanel>
                             <StackPanel Orientation="Horizontal">
                                 <RadioButton x:Name="m_openvrRadio" Content="OpenVR"/>
                                 <RadioButton x:Name="m_openxrRadio" Content="OpenXR"/>
