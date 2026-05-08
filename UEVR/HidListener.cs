@@ -52,10 +52,20 @@ namespace UEVR {
             public uint dwCount;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        struct RAWINPUTDEVICELIST {
+            public IntPtr hDevice;
+            public uint dwType;
+        }
+
         [DllImport("user32.dll", SetLastError = true)]
         static extern bool RegisterRawInputDevices(
             [MarshalAs(UnmanagedType.LPArray)] RAWINPUTDEVICE[] devices,
             uint uiNumDevices, uint cbSize);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern uint GetRawInputDeviceList(
+            IntPtr pRawInputDeviceList, ref uint puiNumDevices, uint cbSize);
 
         [DllImport("user32.dll", SetLastError = true)]
         static extern uint GetRawInputData(
@@ -129,6 +139,32 @@ namespace UEVR {
         public void SetBinding(HidBinding? binding) {
             m_binding = binding;
             m_lastUsages.Clear();
+            if (binding != null && binding.IsValid)
+                PrimePreparsedCache(binding.DevicePath);
+        }
+
+        // Must enumerate at bind time: GetRawInputDeviceInfo(RIDI_PREPARSEDDATA) silently returns size=0 in background WM_INPUT context.
+        private void PrimePreparsedCache(string devicePath) {
+            if (m_preparsedCache.ContainsKey(devicePath)) return;
+
+            uint count = 0;
+            int itemSize = Marshal.SizeOf<RAWINPUTDEVICELIST>();
+            GetRawInputDeviceList(IntPtr.Zero, ref count, (uint)itemSize);
+            if (count == 0) return;
+
+            var buf = Marshal.AllocHGlobal((int)count * itemSize);
+            try {
+                if (GetRawInputDeviceList(buf, ref count, (uint)itemSize) == uint.MaxValue) return;
+                for (uint i = 0; i < count; i++) {
+                    var item = Marshal.PtrToStructure<RAWINPUTDEVICELIST>(buf + (int)(i * itemSize));
+                    if (GetDevicePath(item.hDevice).Equals(devicePath, StringComparison.OrdinalIgnoreCase)) {
+                        GetOrFetchPreparsedData(devicePath, item.hDevice);
+                        return;
+                    }
+                }
+            } finally {
+                Marshal.FreeHGlobal(buf);
+            }
         }
 
         public HidBinding? GetBinding() => m_binding;
