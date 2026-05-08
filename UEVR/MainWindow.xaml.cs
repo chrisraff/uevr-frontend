@@ -1207,7 +1207,7 @@ namespace UEVR {
         private SemaphoreSlim m_processSemaphore = new SemaphoreSlim(1, 1); // create a semaphore with initial count of 1 and max count of 1
         private string? m_lastDefaultProcessListName = null;
 
-        private async void FillProcessList() {
+        private async Task FillProcessList() {
             // Allow the previous running FillProcessList task to finish first
             if (m_processSemaphore.CurrentCount == 0) {
                 return;
@@ -1301,8 +1301,11 @@ namespace UEVR {
         }
 
         private void OnHidBindingTriggered() {
-            Dispatcher.Invoke(() => {
+            Dispatcher.InvokeAsync(async () => {
                 if (m_connected) return; // already injected
+
+                if (m_processList.Count == 0)
+                    await FillProcessList();
 
                 // Find injectable process
                 Process? target = null;
@@ -1325,6 +1328,13 @@ namespace UEVR {
                     m_processListBox.SelectedIndex < m_processList.Count) {
                     var candidate = m_processList[m_processListBox.SelectedIndex];
                     if (candidate != null && !candidate.HasExited) target = candidate;
+                }
+
+                // Last resort: first injectable process in the list
+                if (target == null) {
+                    foreach (var p in m_processList) {
+                        if (p != null && !p.HasExited && IsInjectableProcess(p)) { target = p; break; }
+                    }
                 }
 
                 if (target == null) return;
