@@ -180,6 +180,12 @@ namespace UEVR {
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
         [DllImport("winmm.dll", SetLastError = true)]
         private static extern bool PlaySound(string pszSound, IntPtr hmod, uint fdwSound);
         private const uint SND_ALIAS = 0x00010000;
@@ -381,6 +387,7 @@ namespace UEVR {
                         }
 
                         Injector.InjectDll(process.Id, "UEVRBackend.dll");
+                        RememberLastInjectedProcess(process.ProcessName);
                     }
 
                     m_lastAutoInjectTime = now;
@@ -1119,6 +1126,7 @@ namespace UEVR {
                 }
 
                 Injector.InjectDll(process.Id, "UEVRBackend.dll");
+                RememberLastInjectedProcess(process.ProcessName);
             }
 
             if (m_focusGameOnInjectionCheckbox.IsChecked == true)
@@ -1204,6 +1212,41 @@ namespace UEVR {
 
             return false;
         }
+
+        private Process? FindInjectableProcessByName(string processName) {
+            if (string.IsNullOrEmpty(processName)) return null;
+
+            foreach (var p in Process.GetProcessesByName(processName)) {
+                if (IsInjectableProcess(p)) return p;
+            }
+
+            return null;
+        }
+
+        // Whatever window currently has input focus, if it's a process we could inject into.
+        // GetForegroundWindow is reliable for what it reports, but it only reflects desktop
+        // input focus — if the user alt-tabs away from the game before pressing the bound
+        // button, this will reflect the other window instead.
+        private Process? GetForegroundInjectableProcess() {
+            try {
+                var hwnd = GetForegroundWindow();
+                if (hwnd == IntPtr.Zero) return null;
+
+                GetWindowThreadProcessId(hwnd, out uint pid);
+                if (pid == 0) return null;
+
+                var process = Process.GetProcessById((int)pid);
+                return IsInjectableProcess(process) ? process : null;
+            } catch {
+                return null;
+            }
+        }
+
+        private void RememberLastInjectedProcess(string processName) {
+            m_mainWindowSettings.LastInjectedProcessName = processName;
+            m_mainWindowSettings.Save();
+        }
+
         private SemaphoreSlim m_processSemaphore = new SemaphoreSlim(1, 1); // create a semaphore with initial count of 1 and max count of 1
         private string? m_lastDefaultProcessListName = null;
 
@@ -1307,10 +1350,12 @@ namespace UEVR {
                 if (m_processList.Count == 0)
                     await FillProcessList();
 
-                // Find injectable process
-                Process? target = null;
+                // Find injectable process. The currently focused window is the strongest signal
+                // of intent — it's normally the game itself, since pressing a bound controller
+                // button only makes sense while playing.
+                Process? target = GetForegroundInjectableProcess();
 
-                if (m_lastSelectedProcessId != 0) {
+                if (target == null && m_lastSelectedProcessId != 0) {
                     try {
                         var p = Process.GetProcessById(m_lastSelectedProcessId);
                         if (p != null && !p.HasExited) target = p;
@@ -1318,9 +1363,12 @@ namespace UEVR {
                 }
 
                 if (target == null && !string.IsNullOrEmpty(m_lastSelectedProcessName)) {
-                    foreach (var p in Process.GetProcessesByName(m_lastSelectedProcessName)) {
-                        if (IsInjectableProcess(p)) { target = p; break; }
-                    }
+                    target = FindInjectableProcessByName(m_lastSelectedProcessName);
+                }
+
+                // Fall back to the process we last successfully injected into, even across restarts
+                if (target == null) {
+                    target = FindInjectableProcessByName(m_mainWindowSettings.LastInjectedProcessName);
                 }
 
                 // Fall back to whatever injectable process is currently selected in the list
@@ -1361,6 +1409,7 @@ namespace UEVR {
                     } catch { }
 
                     Injector.InjectDll(target.Id, "UEVRBackend.dll");
+                    RememberLastInjectedProcess(target.ProcessName);
                     PlaySound("SystemAsterisk", IntPtr.Zero, SND_ALIAS | SND_ASYNC);
                 }
             });

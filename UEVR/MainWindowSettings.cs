@@ -63,5 +63,12 @@ namespace UEVR {
             get { return (int)this["HidBindingBitIndex"]; }
             set { this["HidBindingBitIndex"] = value; }
         }
+
+        [UserScopedSettingAttribute()]
+        [DefaultSettingValueAttribute("")]
+        public string LastInjectedProcessName {
+            get { return (string)(this["LastInjectedProcessName"] ?? ""); }
+            set { this["LastInjectedProcessName"] = value; }
+        }
     }
 }
