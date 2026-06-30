@@ -152,10 +152,21 @@ namespace UEVR {
         }
     }
 
+    // Represents one entry in the process drop-down — either the foreground sentinel,
+    // a currently-running process, or a historical name from a previous session.
+    class ProcessEntry {
+        public bool IsForeground { get; init; }
+        public Process? LiveProcess { get; init; }
+        public string? HistoricalName { get; init; }  // non-null only for not-running history entries
+        public bool IsHistorical => HistoricalName != null && LiveProcess == null;
+    }
+
     public partial class MainWindow : Window {
         // variables
         // process list
-        private List<Process> m_processList = new List<Process>();
+        private List<ProcessEntry> m_processList = new List<ProcessEntry>();
+        private const string ForegroundSentinelDisplay = "<Foreground process>";
+        private bool m_injectIntoForeground = false;
         private MainWindowSettings m_mainWindowSettings = new MainWindowSettings();
 
         private string m_lastSelectedProcessName = new string("");
@@ -932,29 +943,42 @@ namespace UEVR {
         private bool m_isFirstProcessFill = true;
 
         private void ComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
-            //ComboBoxItem comboBoxItem = ((sender as ComboBox).SelectedItem as ComboBoxItem);
-
             try {
                 var box = (sender as ComboBox);
-                if (box == null || box.SelectedIndex < 0 || box.SelectedIndex > m_processList.Count) {
+                if (box == null || box.SelectedIndex < 0 || box.SelectedIndex >= m_processList.Count) {
                     return;
                 }
 
-                var p = m_processList[box.SelectedIndex];
-                if (p == null || p.HasExited) {
+                var entry = m_processList[box.SelectedIndex];
+
+                if (entry.IsForeground) {
+                    m_injectIntoForeground = true;
+                    m_lastSelectedProcessName = "";
+                    m_lastSelectedProcessId = 0;
+                    m_lastDefaultProcessListName = ForegroundSentinelDisplay;
                     return;
                 }
+
+                m_injectIntoForeground = false;
+
+                if (entry.IsHistorical) {
+                    m_lastSelectedProcessName = entry.HistoricalName!;
+                    m_lastSelectedProcessId = 0;
+                    m_lastDefaultProcessListName = $"{entry.HistoricalName} (last session, not running)";
+                    return;
+                }
+
+                // Running process entry
+                var p = entry.LiveProcess;
+                if (p == null || p.HasExited) return;
 
                 m_lastSelectedProcessName = p.ProcessName;
                 m_lastSelectedProcessId = p.Id;
 
-                // Search for the VR plugins inside the game directory
-                // and warn the user if they exist.
                 if (m_lastDisplayedWarningProcess != m_lastSelectedProcessName && p.MainModule != null) {
                     m_lastDisplayedWarningProcess = m_lastSelectedProcessName;
 
                     var gamePath = p.MainModule.FileName;
-                    
                     if (gamePath != null) {
                         var gameDirectory = System.IO.Path.GetDirectoryName(gamePath);
 
@@ -978,7 +1002,7 @@ namespace UEVR {
 
                             Check_VirtualDesktop();
 
-                            m_iniListView.ItemsSource = null; // Because we are switching processes.
+                            m_iniListView.ItemsSource = null;
                             InitializeConfig(p.ProcessName);
 
                             if (!IsUnrealEngineGame(gameDirectory, m_lastSelectedProcessName) && !m_isFirstProcessFill) {
@@ -1048,48 +1072,52 @@ namespace UEVR {
                 return;
             }
 
-            var selectedProcessName = m_processListBox.SelectedItem;
-
-            if (selectedProcessName == null) {
-                return;
-            }
+            if (m_processListBox.SelectedItem == null) return;
 
             var index = m_processListBox.SelectedIndex;
-            var process = m_processList[index];
+            if (index < 0 || index >= m_processList.Count) return;
 
-            if (process == null) {
-                return;
-            }
+            var entry = m_processList[index];
+            Process? process;
 
-            // Double check that the process we want to inject into exists
-            // this can happen if the user presses inject again while
-            // the previous combo entry is still selected but the old process
-            // has died.
-            try {
-                var verifyProcess = Process.GetProcessById(m_lastSelectedProcessId);
-
-                if (verifyProcess == null || verifyProcess.HasExited || verifyProcess.ProcessName != m_lastSelectedProcessName) {
-                    var processes = Process.GetProcessesByName(m_lastSelectedProcessName);
-
-                    if (processes == null || processes.Length == 0 || !AnyInjectableProcesses(processes)) {
-                        return;
-                    }
-
-                    foreach (var candidate in processes) {
-                        if (IsInjectableProcess(candidate)) {
-                            process = candidate;
-                            break;
-                        }
-                    }
-
-                    m_processList[index] = process;
-                    m_processListBox.Items[index] = GenerateProcessName(process);
-                    m_processListBox.SelectedIndex = index;
+            if (entry.IsForeground) {
+                process = GetForegroundInjectableProcess();
+                if (process == null) {
+                    MessageBox.Show("No injectable process is currently in the foreground.\nMake sure the game window has focus.");
+                    return;
                 }
-            } catch(Exception ex) {
-                MessageBox.Show(ex.Message);
-                return;
+            } else {
+                // For historical entries m_lastSelectedProcessId is 0 — skip GetProcessById and
+                // go straight to the name lookup; for running entries, verify the PID is still alive.
+                process = entry.LiveProcess;
+                try {
+                    bool needsRefresh = m_lastSelectedProcessId == 0;
+                    if (!needsRefresh) {
+                        var verifyProcess = Process.GetProcessById(m_lastSelectedProcessId);
+                        needsRefresh = verifyProcess == null || verifyProcess.HasExited ||
+                                       verifyProcess.ProcessName != m_lastSelectedProcessName;
+                    }
+
+                    if (needsRefresh) {
+                        var processes = Process.GetProcessesByName(m_lastSelectedProcessName);
+                        if (processes == null || processes.Length == 0 || !AnyInjectableProcesses(processes)) {
+                            return;
+                        }
+                        foreach (var candidate in processes) {
+                            if (IsInjectableProcess(candidate)) { process = candidate; break; }
+                        }
+                        // Upgrade the list entry now that we have a live process
+                        m_processList[index] = new ProcessEntry { LiveProcess = process };
+                        m_processListBox.Items[index] = GenerateProcessName(process!);
+                        m_processListBox.SelectedIndex = index;
+                    }
+                } catch (Exception ex) {
+                    MessageBox.Show(ex.Message);
+                    return;
+                }
             }
+
+            if (process == null) return;
 
             string runtimeName;
 
@@ -1242,8 +1270,18 @@ namespace UEVR {
             }
         }
 
+        private List<string> GetInjectionHistory() {
+            var raw = m_mainWindowSettings.InjectionHistory;
+            if (string.IsNullOrEmpty(raw)) return new List<string>();
+            return raw.Split('|').Where(s => !string.IsNullOrEmpty(s)).ToList();
+        }
+
         private void RememberLastInjectedProcess(string processName) {
-            m_mainWindowSettings.LastInjectedProcessName = processName;
+            var history = GetInjectionHistory();
+            history.Remove(processName);          // deduplicate
+            history.Insert(0, processName);        // most recent first
+            if (history.Count > 5) history.RemoveRange(5, history.Count - 5);
+            m_mainWindowSettings.InjectionHistory = string.Join("|", history);
             m_mainWindowSettings.Save();
         }
 
@@ -1251,64 +1289,76 @@ namespace UEVR {
         private string? m_lastDefaultProcessListName = null;
 
         private async Task FillProcessList() {
-            // Allow the previous running FillProcessList task to finish first
-            if (m_processSemaphore.CurrentCount == 0) {
-                return;
-            }
-
+            if (m_processSemaphore.CurrentCount == 0) return;
             await m_processSemaphore.WaitAsync();
 
             try {
+                var runningEntries = new List<ProcessEntry>();
+
+                await Task.Run(() => {
+                    foreach (Process process in Process.GetProcesses()) {
+                        if (IsInjectableProcess(process))
+                            lock (runningEntries) { runningEntries.Add(new ProcessEntry { LiveProcess = process }); }
+                    }
+                });
+
+                // Build the full list on the UI thread
+                runningEntries.Sort((a, b) => a.LiveProcess!.ProcessName.CompareTo(b.LiveProcess!.ProcessName));
+
                 m_processList.Clear();
                 m_processListBox.Items.Clear();
 
-                await Task.Run(() => {
-                    // get the list of processes
-                    Process[] processList = Process.GetProcesses();
+                // [0] Always the foreground sentinel
+                m_processList.Add(new ProcessEntry { IsForeground = true });
+                m_processListBox.Items.Add(ForegroundSentinelDisplay);
 
-                    // loop through the list of processes
-                    foreach (Process process in processList) {
-                        if (!IsInjectableProcess(process)) {
-                            continue;
+                // [1..N] Currently running processes
+                foreach (var entry in runningEntries) {
+                    string display = GenerateProcessName(entry.LiveProcess!);
+                    m_processList.Add(entry);
+                    m_processListBox.Items.Add(display);
+                }
+
+                // [N+1..M] History entries that are not currently running
+                var runningNames = runningEntries
+                    .Select(e => e.LiveProcess!.ProcessName)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var name in GetInjectionHistory()) {
+                    if (runningNames.Contains(name)) continue;
+                    m_processList.Add(new ProcessEntry { HistoricalName = name });
+                    m_processListBox.Items.Add($"{name} (last session, not running)");
+                }
+
+                // Restore prior selection
+                if (m_injectIntoForeground) {
+                    m_processListBox.SelectedIndex = 0;
+                } else if (m_lastDefaultProcessListName != null) {
+                    for (int i = 0; i < m_processListBox.Items.Count; i++) {
+                        if ((string)m_processListBox.Items[i] == m_lastDefaultProcessListName) {
+                            m_processListBox.SelectedIndex = i;
+                            break;
                         }
-
-                        Application.Current.Dispatcher.Invoke(() =>
-                        {
-                            m_processList.Add(process);
-                            m_processList.Sort((a, b) => a.ProcessName.CompareTo(b.ProcessName));
-                            m_processListBox.Items.Clear();
-
-                            foreach (Process p in m_processList) {
-                                string processName = GenerateProcessName(p);
-                                m_processListBox.Items.Add(processName);
-
-                                if (m_processListBox.SelectedItem == null && m_processListBox.Items.Count > 0) {
-                                    if (m_lastDefaultProcessListName == null || m_lastDefaultProcessListName == processName) {
-                                        m_processListBox.SelectedItem = m_processListBox.Items[m_processListBox.Items.Count - 1];
-                                        m_lastDefaultProcessListName = processName;
-                                    }
-                                }
-                            }
-                        });
                     }
-
-                    Application.Current.Dispatcher.Invoke(() =>
-                    {
-                        m_processListBox.Items.Clear();
-
-                        foreach (Process process in m_processList) {
-                            string processName = GenerateProcessName(process);
-                            m_processListBox.Items.Add(processName);
-
-                            if (m_processListBox.SelectedItem == null && m_processListBox.Items.Count > 0) {
-                                if (m_lastDefaultProcessListName == null || m_lastDefaultProcessListName == processName) {
-                                    m_processListBox.SelectedItem = m_processListBox.Items[m_processListBox.Items.Count - 1];
-                                    m_lastDefaultProcessListName = processName;
-                                }
+                    // If the exact display string is gone (e.g. PID changed), try matching by process name
+                    if (m_processListBox.SelectedIndex < 0 && !string.IsNullOrEmpty(m_lastSelectedProcessName)) {
+                        for (int i = 1; i < m_processList.Count; i++) {
+                            var e = m_processList[i];
+                            string? name = e.LiveProcess?.ProcessName ?? e.HistoricalName;
+                            if (string.Equals(name, m_lastSelectedProcessName, StringComparison.OrdinalIgnoreCase)) {
+                                m_processListBox.SelectedIndex = i;
+                                m_lastDefaultProcessListName = (string)m_processListBox.Items[i];
+                                break;
                             }
                         }
-                    });
-                });
+                    }
+                }
+
+                // Default: pick first running entry when nothing else matched
+                if (m_processListBox.SelectedIndex < 0 && m_processList.Count > 1) {
+                    m_processListBox.SelectedIndex = 1;
+                    m_lastDefaultProcessListName = (string)m_processListBox.Items[1];
+                }
             } finally {
                 m_processSemaphore.Release();
             }
@@ -1366,22 +1416,26 @@ namespace UEVR {
                     target = FindInjectableProcessByName(m_lastSelectedProcessName);
                 }
 
-                // Fall back to the process we last successfully injected into, even across restarts
+                // Fall back to the most recent process in the injection history (persists across restarts)
                 if (target == null) {
-                    target = FindInjectableProcessByName(m_mainWindowSettings.LastInjectedProcessName);
+                    foreach (var name in GetInjectionHistory()) {
+                        target = FindInjectableProcessByName(name);
+                        if (target != null) break;
+                    }
                 }
 
                 // Fall back to whatever injectable process is currently selected in the list
                 if (target == null && m_processListBox.SelectedIndex >= 0 &&
                     m_processListBox.SelectedIndex < m_processList.Count) {
-                    var candidate = m_processList[m_processListBox.SelectedIndex];
-                    if (candidate != null && !candidate.HasExited) target = candidate;
+                    var lp = m_processList[m_processListBox.SelectedIndex].LiveProcess;
+                    if (lp != null && !lp.HasExited) target = lp;
                 }
 
-                // Last resort: first injectable process in the list
+                // Last resort: first running injectable process in the list
                 if (target == null) {
-                    foreach (var p in m_processList) {
-                        if (p != null && !p.HasExited && IsInjectableProcess(p)) { target = p; break; }
+                    foreach (var entry in m_processList) {
+                        var lp = entry.LiveProcess;
+                        if (lp != null && !lp.HasExited && IsInjectableProcess(lp)) { target = lp; break; }
                     }
                 }
 

@@ -64,11 +64,12 @@ namespace UEVR {
             set { this["HidBindingBitIndex"] = value; }
         }
 
+        // Pipe-separated list of process names, most recent first, capped at 5 entries.
         [UserScopedSettingAttribute()]
         [DefaultSettingValueAttribute("")]
-        public string LastInjectedProcessName {
-            get { return (string)(this["LastInjectedProcessName"] ?? ""); }
-            set { this["LastInjectedProcessName"] = value; }
+        public string InjectionHistory {
+            get { return (string)(this["InjectionHistory"] ?? ""); }
+            set { this["InjectionHistory"] = value; }
         }
     }
 }
